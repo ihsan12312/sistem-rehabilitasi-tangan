@@ -1,0 +1,21 @@
+# requirements.txt
+# Proyek Skripsi: Deteksi Anomali Gerakan Rehabilitasi Tangan
+# Install semua dependency dengan perintah:
+#   pip install -r requirements.txt
+
+# Computer Vision & Pose Estimation
+opencv-python>=4.8.0
+mediapipe>=0.10.0
+
+# Numerik & Data
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Machine Learning
+tensorflow>=2.13.0
+scikit-learn>=1.3.0
+joblib>=1.3.0
+
+# Visualisasi (untuk Colab)
+matplotlib>=3.7.0
+seaborn>=0.12.0

@@ -1,0 +1,13 @@
+# PANDUAN LENGKAP MENJALANKAN PROYEK Rehabilitasi
+# ============================================================
+# File ini adalah panduan. Buka di VS Code untuk membaca.
+# ============================================================
+
+URUTAN KESELURUHAN:
+===================
+LANGKAH 0 → Install Library (sekali saja)
+LANGKAH 1 → Jalankan rekam_dataset.py (rekam video) — OPSIONAL jika sudah ada dataset publik
+LANGKAH 2 → Jalankan adapter_dataset_publik.py (sudah selesai, dataset_normal.csv sudah ada)
+LANGKAH 3 → Upload ke Google Colab & Training
+LANGKAH 4 → Jalankan fase3_Rehabilitasi_app.py (aplikasi real-time)
+
