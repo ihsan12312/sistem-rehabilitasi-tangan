@@ -1,16 +1,16 @@
 """
 ==========================================================================
- FASE 2: PELATIHAN MODEL LSTM-AUTOENCODER — ADVANCED
- Proyek Skripsi: Deteksi Anomali Gerakan Rehabilitasi Tangan
- Versi: 2.0 Advanced
+FASE 2: PELATIHAN MODEL LSTM-AUTOENCODER — ADVANCED
+Proyek Skripsi: Deteksi Anomali Gerakan Rehabilitasi Tangan
+Versi: 2.0 Advanced
 ==========================================================================
- PENINGKATAN:
-   - Logging terstruktur dengan timestamp
-   - Plot training history otomatis disimpan ke PNG
-   - Validasi threshold via distribusi statistik (histogram disimpan)
-   - Laporan evaluasi model lengkap (MSE stats per split)
-   - Arsitektur model dengan BatchNormalization
-   - Konfigurasi via dataclass
+PENINGKATAN:
+- Logging terstruktur dengan timestamp
+- Plot training history otomatis disimpan ke PNG
+- Validasi threshold via distribusi statistik (histogram disimpan)
+- Laporan evaluasi model lengkap (MSE stats per split)
+- Arsitektur model dengan BatchNormalization
+- Konfigurasi via dataclass
 ==========================================================================
 """
 
@@ -18,6 +18,11 @@ import logging
 import os
 import sys
 import time
+
+# Silence TensorFlow oneDNN warnings before importing anything else
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -55,12 +60,15 @@ class TrainingConfig:
 
 def build_model(cfg: TrainingConfig):
     """Bangun arsitektur LSTM-Autoencoder dengan BatchNormalization."""
-    import keras
-    from keras.layers import (
-        LSTM, BatchNormalization, Dense, Dropout, Input, RepeatVector,
-        TimeDistributed,
-    )
-    from keras.models import Sequential
+    import tensorflow as tf
+    LSTM = tf.keras.layers.LSTM
+    BatchNormalization = tf.keras.layers.BatchNormalization
+    Dense = tf.keras.layers.Dense
+    Dropout = tf.keras.layers.Dropout
+    Input = tf.keras.layers.Input
+    RepeatVector = tf.keras.layers.RepeatVector
+    TimeDistributed = tf.keras.layers.TimeDistributed
+    Sequential = tf.keras.models.Sequential
 
     model = Sequential(name="LSTM_Autoencoder_Rehabilitasi_v2")
 
@@ -69,24 +77,31 @@ def build_model(cfg: TrainingConfig):
 
     # ---- ENCODER ----
     model.add(LSTM(128, activation='tanh', return_sequences=True))
+    model.add(BatchNormalization())
     model.add(Dropout(0.2))
     model.add(LSTM(64, activation='tanh', return_sequences=True))
+    model.add(BatchNormalization())
     model.add(Dropout(0.2))
     model.add(LSTM(32, activation='tanh', return_sequences=False))
+    model.add(BatchNormalization())
 
     # ---- BOTTLENECK ----
     model.add(RepeatVector(cfg.window_size))
 
     # ---- DECODER ----
     model.add(LSTM(32, activation='tanh', return_sequences=True))
+    model.add(BatchNormalization())
     model.add(Dropout(0.2))
     model.add(LSTM(64, activation='tanh', return_sequences=True))
+    model.add(BatchNormalization())
     model.add(Dropout(0.2))
     model.add(LSTM(128, activation='tanh', return_sequences=True))
+    model.add(BatchNormalization())
     model.add(TimeDistributed(Dense(cfg.n_features)))
 
+    Adam = tf.keras.optimizers.Adam
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=cfg.lr),
+        optimizer=Adam(learning_rate=cfg.lr),
         loss='mse',
         metrics=['mae']
     )
@@ -176,7 +191,7 @@ def main():
     log.info(f"  CSV      : {cfg.csv_file}")
     log.info(f"  Window   : {cfg.window_size}  |  Features: {cfg.n_features}")
     log.info(f"  Epochs   : {cfg.epochs}  |  Batch: {cfg.batch_size}")
-    log.info(f"  Threshold k: μ + {cfg.threshold_k}σ")
+    log.info(f"  Threshold k: mu + {cfg.threshold_k}*sigma")
     log.info("=" * 60)
 
     # ---- 1. Load Data ----
@@ -210,8 +225,10 @@ def main():
     log.info(f"   Train: {len(X_train)}  |  Test: {len(X_test)}")
 
     # ---- 4. Build Model ----
-    import keras
-    from keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+    import tensorflow as tf
+    EarlyStopping = tf.keras.callbacks.EarlyStopping
+    ModelCheckpoint = tf.keras.callbacks.ModelCheckpoint
+    ReduceLROnPlateau = tf.keras.callbacks.ReduceLROnPlateau
 
     log.info("4. Membangun arsitektur LSTM-Autoencoder Advanced...")
     model = build_model(cfg)
@@ -252,9 +269,9 @@ def main():
     sigma_mse     = float(np.std(mse_train))
     THRESHOLD     = mu_mse + (cfg.threshold_k * sigma_mse)
 
-    log.info(f"   μ (mean MSE) = {mu_mse:.8f}")
-    log.info(f"   σ (std  MSE) = {sigma_mse:.8f}")
-    log.info(f"   Threshold (μ + {cfg.threshold_k}σ) = {THRESHOLD:.8f}")
+    log.info(f"   mu (mean MSE) = {mu_mse:.8f}")
+    log.info(f"   sigma (std  MSE) = {sigma_mse:.8f}")
+    log.info(f"   Threshold (mu + {cfg.threshold_k}*sigma) = {THRESHOLD:.8f}")
 
     save_threshold_histogram(mse_train, THRESHOLD, cfg.model_dir)
 

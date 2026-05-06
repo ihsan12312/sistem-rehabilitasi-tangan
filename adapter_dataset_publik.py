@@ -1,19 +1,19 @@
 """
 ==========================================================================
- ADAPTER DATASET PUBLIK -> FORMAT Rehabilitasi
- Proyek Skripsi: Deteksi Anomali Gerakan Rehabilitasi Tangan
+ADAPTER DATASET PUBLIK -> FORMAT Rehabilitasi
+Proyek Skripsi: Deteksi Anomali Gerakan Rehabilitasi Tangan
 ==========================================================================
- TUJUAN : Mengkonversi dataset DynTherapy (33 pose landmarks MediaPipe)
-          menjadi format dataset_normal.csv yang dibutuhkan Fase 2.
-          
- Dataset DynTherapy berisi gerakan fisioterapi nyata dari jurnal akademik:
- "DynTherapy: Physical Therapy Exercises Dataset" (Mendeley, 2024)
- DOI: 10.17632/hghdm99rwg.1
- 
- CARA PAKAI:
-   1. Pastikan file fitness_poses_dyntherapy.csv ada di data/raw_datasets/
-   2. Jalankan: python adapter_dataset_publik.py
-   3. Output: data/processed_data/dataset_normal.csv (siap untuk Fase 2)
+TUJUAN : Mengkonversi dataset DynTherapy (33 pose landmarks MediaPipe)
+        menjadi format dataset_normal.csv yang dibutuhkan Fase 2.
+        
+Dataset DynTherapy berisi gerakan fisioterapi nyata dari jurnal akademik:
+"DynTherapy: Physical Therapy Exercises Dataset" (Mendeley, 2024)
+DOI: 10.17632/hghdm99rwg.1
+
+CARA PAKAI:
+1. Pastikan file fitness_poses_dyntherapy.csv ada di data/raw_datasets/
+2. Jalankan: python adapter_dataset_publik.py
+3. Output: data/processed_data/dataset_normal.csv (siap untuk Fase 2)
 ==========================================================================
 """
 

@@ -1,29 +1,31 @@
 """
 ==========================================================================
- FASE 3: APLIKASI REAL-TIME "Rehabilitasi" - ADVANCED DEPLOYMENT
- Proyek Skripsi: Deteksi Anomali Gerakan Rehabilitasi Tangan
- Versi: 3.0 Advanced | Menggunakan LSTM-Autoencoder + MediaPipe
+FASE 3: APLIKASI REAL-TIME "Rehabilitasi" - ADVANCED DEPLOYMENT
+Proyek Skripsi: Deteksi Anomali Gerakan Rehabilitasi Tangan
+Versi: 3.0 Advanced | Menggunakan LSTM-Autoencoder + MediaPipe
 ==========================================================================
- FITUR ADVANCED:
-   - Arsitektur OOP penuh (class RehabilitasiSystem)
-   - Smoothing prediksi (anti false-alarm)
-   - Minimum anomaly streak detection
-   - Real-time MSE graph di layar
-   - Panel statistik sesi (skor, FPS, durasi, anomali count)
-   - Auto-save session log ke CSV
-   - Graceful shutdown (Ctrl+C aman)
-   - Snapshot foto (tekan 'S')
-   - Reset sesi (tekan 'R')
-   - Validasi model otomatis saat startup
+FITUR ADVANCED:
+- Arsitektur OOP penuh (class RehabilitasiSystem)
+- Smoothing prediksi (anti false-alarm)
+- Minimum anomaly streak detection
+- Real-time MSE graph di layar
+- Panel statistik sesi (skor, FPS, durasi, anomali count)
+- Auto-save session log ke CSV
+- Graceful shutdown (Ctrl+C aman)
+- Snapshot foto (tekan 'S')
+- Reset sesi (tekan 'R')
+- Validasi model otomatis saat startup
 ==========================================================================
- KONTROL:
-   Q = Keluar   |   S = Simpan Snapshot   |   R = Reset Sesi
+KONTROL:
+Q = Keluar   |   S = Simpan Snapshot   |   R = Reset Sesi
 ==========================================================================
 """
 
 # --- Environment fix HARUS paling pertama ---
 import os
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 import csv
 import logging
@@ -153,7 +155,8 @@ class RehabilitasiSystem:
         return True
 
     def _load_model(self) -> bool:
-        from tensorflow.keras.models import load_model
+        import tensorflow as tf
+        load_model = tf.keras.models.load_model
         log.info(f"Memuat Model AI dari: {self.cfg.model_path}")
         try:
             self.model = load_model(self.cfg.model_path, compile=False)
@@ -221,7 +224,7 @@ class RehabilitasiSystem:
         input_data = np.array(self.seq_buffer).reshape(
             1, self.cfg.window_size, self.cfg.n_features
         )
-        recon = self.model.predict(input_data, verbose=0)
+        recon = self.model(input_data, training=False).numpy()
         raw_mse = float(np.mean(np.power(input_data - recon, 2)))
 
         self.mse_history_smooth.append(raw_mse)
