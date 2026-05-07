@@ -54,8 +54,10 @@ class TrainingConfig:
     val_split:   float = 0.10
     random_seed: int   = 42
     lr:          float = 0.001
-    # Threshold: μ + k*σ (k=4 lebih toleran untuk menekan False Positive hingga nyaris 0%)
-    threshold_k: float = 4
+    # Threshold: μ + k*σ
+    # k=4 memberikan toleransi yang cukup untuk variasi gerakan manusia
+    # dan menekan False Positive hingga nyaris 0%.
+    threshold_k: float = 4.0
 
 
 def build_model(cfg: TrainingConfig):

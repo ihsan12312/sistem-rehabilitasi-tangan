@@ -27,41 +27,62 @@ logging.getLogger('mediapipe').setLevel(logging.ERROR)
 # -----------------------------------------------------------------------
 # KONFIGURASI (Sesuaikan jika perlu)
 # -----------------------------------------------------------------------
-WINDOW_SIZE    = 30          # Jumlah frame per sekuens (sliding window)
-VIDEO_FOLDER   = "data/raw_videos/"
-OUTPUT_CSV     = "data/processed_data/dataset_normal.csv"
-MIN_DETECT_CONF = 0.7        # Minimum confidence untuk deteksi tangan
+WINDOW_SIZE     = 30          # Jumlah frame per sekuens (sliding window)
+VIDEO_FOLDER    = "data/raw_videos/"
+OUTPUT_CSV      = "data/processed_data/dataset_normal.csv"
+MIN_DETECT_CONF = 0.7         # Minimum confidence untuk deteksi tangan
+# Frame Skipping: ambil setiap frame ke-N agar FPS ekstraksi cocok dengan FPS real-time
+# Video asli 30 FPS, aplikasi real-time ~7.5 FPS → ambil setiap frame ke-4
+FRAME_SKIP      = 4
 # -----------------------------------------------------------------------
 
 
-def extract_and_normalize(video_path, window_size=30):
+def extract_and_normalize(video_path: str, window_size: int = 30) -> np.ndarray:
     """
     Membaca satu file video, mengekstrak landmark tangan per-frame
     dengan MediaPipe, menormalisasi secara ego-centric (pergelangan
     tangan sebagai titik pusat 0,0,0), lalu menghasilkan sekuens
     menggunakan sliding window.
 
+    Sinkronisasi Temporal: Hanya mengambil setiap frame ke-FRAME_SKIP
+    agar kecepatan gerakan yang dipelajari AI cocok dengan kecepatan
+    kamera real-time (~7.5 FPS).
+
     Parameter:
-        video_path  (str)  : Path ke file video MP4.
-        window_size (int)  : Panjang sekuens (jumlah frame per window).
+        video_path  (str) : Path ke file video MP4.
+        window_size (int) : Panjang sekuens (jumlah frame per window).
 
     Return:
         np.ndarray shape (N, window_size, 63)
-            N = jumlah sekuens yang terbentuk
+            N  = jumlah sekuens yang terbentuk
             63 = 21 titik landmark * 3 sumbu (x, y, z)
+        Mengembalikan array kosong jika video tidak valid.
     """
     mp_hands = mp.solutions.hands
     hands = mp_hands.Hands(
         static_image_mode=False,
         max_num_hands=1,
+        model_complexity=0,           # Model ringan, cukup untuk ekstraksi
         min_detection_confidence=MIN_DETECT_CONF
     )
 
+    # [PERBAIKAN] Validasi kamera/file video dapat dibuka sebelum proses
     cap = cv2.VideoCapture(video_path)
-    frame_data = []
-    frame_count = 0
+    if not cap.isOpened():
+        print(f"  [ERROR] Gagal membuka video: {video_path}. Dilewati.")
+        hands.close()
+        return np.array([])
 
-    print(f"  Memproses: {video_path}")
+    # [PENINGKATAN] Tampilkan info FPS video asli untuk transparansi data
+    original_fps  = cap.get(cv2.CAP_PROP_FPS)
+    total_frames  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    effective_fps = original_fps / FRAME_SKIP if original_fps > 0 else "?"
+    print(f"  Memproses: {os.path.basename(video_path)}")
+    print(f"    FPS asli: {original_fps:.1f} | Total frame: {total_frames} | "
+          f"FPS efektif (setelah skip): {effective_fps:.1f}")
+
+    frame_data  = []
+    frame_count = 0
 
     while True:
         ret, image = cap.read()
@@ -69,23 +90,22 @@ def extract_and_normalize(video_path, window_size=30):
             break
 
         frame_count += 1
-        # Sinkronisasi Temporal: Video asli 30 FPS. Aplikasi Real-Time berjalan di ~7.5 FPS.
-        # Kita HANYA mengekstrak setiap frame ke-4 (30/4 = 7.5 FPS) agar kecepatan 
-        # gerakan yang dipelajari AI sama persis dengan kecepatan gerakan di dunia nyata.
-        if frame_count % 4 != 0:
+        # Hanya proses setiap frame ke-FRAME_SKIP (Sinkronisasi Temporal)
+        if frame_count % FRAME_SKIP != 0:
             continue
 
         # Konversi BGR (OpenCV) -> RGB (MediaPipe)
         rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        results = hands.process(rgb_image)
+        results   = hands.process(rgb_image)
 
         if results.multi_hand_landmarks:
             hand_landmarks = results.multi_hand_landmarks[0]
 
-            # Ekstraksi 21 koordinat (x, y, z)
+            # Ekstraksi 21 koordinat (x, y, z) → shape: (21, 3)
             coords = np.array(
-                [[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark]
-            )  # shape: (21, 3)
+                [[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark],
+                dtype=np.float32
+            )
 
             # ---- NORMALISASI EGO-CENTRIC ----
             # Kurangi semua titik dengan koordinat pergelangan tangan (index 0)
@@ -98,19 +118,21 @@ def extract_and_normalize(video_path, window_size=30):
     cap.release()
     hands.close()
 
+    # Validasi: pastikan cukup frame untuk membentuk minimal 1 sekuens
     if len(frame_data) < window_size:
-        print(f"  [PERINGATAN] Video terlalu pendek ({len(frame_data)} frame), dilewati.")
+        print(f"  [PERINGATAN] Hanya {len(frame_data)} frame tangan terdeteksi "
+              f"(butuh minimal {window_size}). Video dilewati.")
         return np.array([])
 
     # ---- SLIDING WINDOW ----
-    # Memecah seluruh frame menjadi potongan sekuens overlap
-    data_array = np.array(frame_data)  # shape: (total_frame, 63)
-    sequences = []
-    for i in range(len(data_array) - window_size):
-        sequences.append(data_array[i: i + window_size])  # shape: (window_size, 63)
+    # Memecah seluruh frame menjadi potongan sekuens yang overlap
+    data_array = np.array(frame_data)       # shape: (total_frame_valid, 63)
+    sequences  = []
+    for i in range(len(data_array) - window_size + 1):
+        sequences.append(data_array[i : i + window_size])
 
-    print(f"  => {len(sequences)} sekuens dihasilkan dari video ini.")
-    return np.array(sequences)  # shape: (N, window_size, 63)
+    print(f"    => {len(sequences)} sekuens dihasilkan.")
+    return np.array(sequences)              # shape: (N, window_size, 63)
 
 
 # ========================================================================
@@ -120,42 +142,61 @@ if __name__ == "__main__":
     print("=" * 60)
     print("  FASE 1 - EKSTRAKSI & NORMALISASI DATA DIMULAI")
     print("=" * 60)
+    print(f"  Folder  : {VIDEO_FOLDER}")
+    print(f"  Window  : {WINDOW_SIZE} frame | Frame Skip: setiap frame ke-{FRAME_SKIP}")
+    print(f"  Output  : {OUTPUT_CSV}")
+    print("=" * 60)
 
     # Pastikan folder output ada
     os.makedirs(os.path.dirname(OUTPUT_CSV), exist_ok=True)
 
-    all_sequences = []
-    video_files = [f for f in os.listdir(VIDEO_FOLDER) if f.endswith(".mp4")]
+    # [PERBAIKAN] Tambahkan sorted() agar video diproses secara konsisten (bukan acak)
+    if not os.path.isdir(VIDEO_FOLDER):
+        print(f"[ERROR] Folder tidak ditemukan: {VIDEO_FOLDER}")
+        exit(1)
+
+    video_files = sorted([f for f in os.listdir(VIDEO_FOLDER) if f.endswith(".mp4")])
 
     if not video_files:
         print(f"[ERROR] Tidak ada file .mp4 ditemukan di folder: {VIDEO_FOLDER}")
         print("  Letakkan video rekaman gerakan normal di folder tersebut lalu jalankan ulang.")
-        exit()
+        exit(1)
 
     print(f"\nTotal video ditemukan: {len(video_files)}")
     print("-" * 60)
 
-    for video_file in video_files:
+    all_sequences = []
+    skipped_count = 0
+
+    for idx, video_file in enumerate(video_files, start=1):
+        print(f"\n[{idx}/{len(video_files)}]", end=" ")
         seq = extract_and_normalize(
             os.path.join(VIDEO_FOLDER, video_file),
             window_size=WINDOW_SIZE
         )
         if seq.size > 0:
             all_sequences.append(seq)
+        else:
+            skipped_count += 1
+
+    print("\n" + "-" * 60)
 
     if not all_sequences:
-        print("\n[ERROR] Tidak ada sekuens valid yang berhasil diekstrak. Periksa video Anda.")
-        exit()
+        print("\n[ERROR] Tidak ada sekuens valid yang berhasil diekstrak.")
+        print("  Pastikan video tidak gelap/blur dan tangan terlihat jelas di kamera.")
+        exit(1)
 
     # Gabungkan semua sekuens dari semua video
     # shape akhir: (Total_Sekuens, WINDOW_SIZE, 63)
     final_dataset = np.vstack(all_sequences)
-    print("-" * 60)
-    print(f"\nTotal sekuens gabungan  : {final_dataset.shape[0]}")
-    print(f"Panjang tiap sekuens    : {final_dataset.shape[1]} frame")
-    print(f"Jumlah fitur per frame  : {final_dataset.shape[2]} (21 landmark x 3 sumbu)")
+    print(f"\nRingkasan Ekstraksi:")
+    print(f"  Video berhasil    : {len(all_sequences)}")
+    print(f"  Video dilewati    : {skipped_count}")
+    print(f"  Total sekuens     : {final_dataset.shape[0]}")
+    print(f"  Panjang sekuens   : {final_dataset.shape[1]} frame")
+    print(f"  Fitur per frame   : {final_dataset.shape[2]} (21 landmark x 3 sumbu)")
 
-    # CSV tidak mendukung array 3D -> reshape ke 2D sebelum disimpan
+    # CSV tidak mendukung array 3D → reshape ke 2D sebelum disimpan
     # shape: (Total_Sekuens, WINDOW_SIZE * 63) = (N, 1890)
     final_dataset_2d = final_dataset.reshape(final_dataset.shape[0], -1)
     pd.DataFrame(final_dataset_2d).to_csv(OUTPUT_CSV, index=False)
@@ -163,6 +204,5 @@ if __name__ == "__main__":
     print(f"\n[SUKSES] Dataset berhasil disimpan ke: {OUTPUT_CSV}")
     print(f"         Ukuran matriks 2D : {final_dataset_2d.shape}")
     print("\nLangkah selanjutnya:")
-    print("  Unggah file CSV ini ke Google Colab dan jalankan fase2_colab_training.ipynb")
+    print("  Jalankan: py fase2_training_lokal.py")
     print("=" * 60)
-

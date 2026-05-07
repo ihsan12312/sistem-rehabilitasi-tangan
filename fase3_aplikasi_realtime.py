@@ -64,6 +64,10 @@ log = logging.getLogger("Rehabilitasi")
 class VideoStream:
     def __init__(self, src=0, width=640, height=480):
         self.stream = cv2.VideoCapture(src)
+        # [PERBAIKAN] Validasi kamera bisa dibuka sebelum lanjut
+        if not self.stream.isOpened():
+            raise IOError(f"Tidak dapat membuka kamera (src={src}). "
+                          "Pastikan webcam tersambung dan tidak dipakai aplikasi lain.")
         self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         self.grabbed, self.frame = self.stream.read()
@@ -167,6 +171,9 @@ class RehabilitasiSystem:
         self.normal_frames     = 0
         self.anomaly_events    = 0
         self._prev_anomaly     = False
+        # [PERBAIKAN] Counter khusus untuk frame skipping inferensi
+        # Terpisah dari total_frames agar tidak terpengaruh frame tanpa tangan
+        self._inference_counter: int = 0
 
         # FPS
         self._fps_times = deque(maxlen=30)
@@ -224,16 +231,24 @@ class RehabilitasiSystem:
             if not Path(self.cfg.threshold_path).exists():
                 raise FileNotFoundError("File threshold tidak ditemukan.")
             with open(self.cfg.threshold_path, 'r') as f:
-                for line in f:
-                    if line.startswith("THRESHOLD"):
-                        self.threshold = float(line.split("=")[1].strip())
-                        log.info(f"Threshold dimuat: {self.threshold:.8f}")
-                        return True
-            log.warning("Format threshold tidak sesuai, memakai default 0.015")
+                content = f.read().strip()
+            # Format baru: "THRESHOLD = 0.002778...\nMU = ..." (multi-line)
+            for line in content.splitlines():
+                if line.startswith("THRESHOLD"):
+                    self.threshold = float(line.split("=")[1].strip())
+                    log.info(f"Threshold dimuat: {self.threshold:.8f}")
+                    return True
+            # [PERBAIKAN] Fallback: format lama (hanya satu angka dalam file)
+            self.threshold = float(content)
+            log.info(f"Threshold dimuat (format lama): {self.threshold:.8f}")
+            return True
+        except (ValueError, FileNotFoundError) as e:
+            log.error(f"Gagal membaca threshold: {e}")
+            log.warning("Menggunakan threshold default: 0.015")
             self.threshold = 0.015
             return True
         except Exception as e:
-            log.error(f"Gagal membaca threshold: {e}")
+            log.error(f"Error tidak terduga saat baca threshold: {e}")
             return False
 
     def _validate_model_shape(self):
@@ -490,8 +505,14 @@ class RehabilitasiSystem:
         )
 
         log.info("Memulai kamera dengan Multithreading...")
-        cap = VideoStream(src=0, width=640, height=480).start()
-        time.sleep(1.0) # Beri waktu kamera memanas
+        try:
+            cap = VideoStream(src=0, width=640, height=480).start()
+        except IOError as e:
+            log.error(str(e))
+            return
+
+        log.info("Kamera menyala. Menunggu stabilisasi (1 detik)...")
+        time.sleep(1.0)  # Beri waktu kamera memanas
 
         self._running      = True
         self.session_start = time.time()
@@ -528,10 +549,13 @@ class RehabilitasiSystem:
                     flat   = self._extract_landmarks(hand_lm)
                     scaled = self.scaler.transform(flat).flatten()
                     self.seq_buffer.append(scaled)
+                    self._inference_counter += 1
 
-                    # Inferensi hanya setiap 3 frame untuk menghemat CPU (Frame Skipping Inference)
+                    # [PERBAIKAN] Inferensi setiap 3 frame TANGAN TERDETEKSI
+                    # Menggunakan _inference_counter (bukan total_frames) agar
+                    # inferensi tidak terlewat saat tangan sempat menghilang.
                     if len(self.seq_buffer) == self.cfg.window_size:
-                        if self.total_frames % 3 == 0:
+                        if self._inference_counter % 3 == 0:
                             self.current_mse = self._predict_mse()
                             self.mse_graph_data.append(self.current_mse)
                             self._update_anomaly_status(self.current_mse)
