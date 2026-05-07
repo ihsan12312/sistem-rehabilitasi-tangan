@@ -54,8 +54,8 @@ class TrainingConfig:
     val_split:   float = 0.10
     random_seed: int   = 42
     lr:          float = 0.001
-    # Threshold: μ + k*σ (k=3 = standar statistik 3-sigma, lebih toleran terhadap variasi normal)
-    threshold_k: float = 3.0
+    # Threshold: μ + k*σ (k=4 lebih toleran untuk menekan False Positive hingga nyaris 0%)
+    threshold_k: float = 4.0
 
 
 def build_model(cfg: TrainingConfig):
@@ -236,11 +236,11 @@ def main():
 
     callbacks = [
         EarlyStopping(monitor='val_loss', patience=20,
-                      restore_best_weights=True, verbose=1),
+                    restore_best_weights=True, verbose=1),
         ModelCheckpoint(str(Path(cfg.model_dir) / "otak_Rehabilitasi_best.keras"),
                         monitor='val_loss', save_best_only=True, verbose=0),
         ReduceLROnPlateau(monitor='val_loss', factor=0.5,
-                          patience=8, min_lr=1e-7, verbose=1),
+                        patience=8, min_lr=1e-7, verbose=1),
     ]
 
     # ---- 5. Training ----

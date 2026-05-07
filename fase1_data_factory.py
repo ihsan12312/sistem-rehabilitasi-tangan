@@ -1,13 +1,13 @@
 """
 ==========================================================================
- FASE 1: PABRIK DATA (DATA FACTORY)
- Proyek Skripsi: Deteksi Anomali Gerakan Rehabilitasi Tangan
- Menggunakan Autoencoder Berbasis Data Pose Estimation (MediaPipe)
+FASE 1: PABRIK DATA (DATA FACTORY)
+Proyek Skripsi: Deteksi Anomali Gerakan Rehabilitasi Tangan
+Menggunakan Autoencoder Berbasis Data Pose Estimation (MediaPipe)
 ==========================================================================
- TUJUAN   : Mengekstrak landmark tangan dari video rekaman gerakan normal,
+TUJUAN   : Mengekstrak landmark tangan dari video rekaman gerakan normal,
             menormalisasi koordinat, lalu menyimpannya ke file CSV.
- EKSEKUSI : Jalankan di VS Code / komputer lokal.
- OUTPUT   : data/processed_data/dataset_normal.csv
+EKSEKUSI : Jalankan di VS Code / komputer lokal.
+OUTPUT   : data/processed_data/dataset_normal.csv
 ==========================================================================
 """
 
@@ -16,7 +16,13 @@ import mediapipe as mp
 import numpy as np
 import pandas as pd
 import os
+import warnings
+import logging
 
+# ---- MEMBUNGKAM PERINGATAN INTERNAL (Log Noise) ----
+os.environ['GLOG_minloglevel'] = '2'
+warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf.symbol_database")
+logging.getLogger('mediapipe').setLevel(logging.ERROR)
 
 # -----------------------------------------------------------------------
 # KONFIGURASI (Sesuaikan jika perlu)
@@ -53,13 +59,21 @@ def extract_and_normalize(video_path, window_size=30):
 
     cap = cv2.VideoCapture(video_path)
     frame_data = []
+    frame_count = 0
 
     print(f"  Memproses: {video_path}")
 
-    while cap.isOpened():
-        success, image = cap.read()
-        if not success:
+    while True:
+        ret, image = cap.read()
+        if not ret:
             break
+
+        frame_count += 1
+        # Sinkronisasi Temporal: Video asli 30 FPS. Aplikasi Real-Time berjalan di ~7.5 FPS.
+        # Kita HANYA mengekstrak setiap frame ke-4 (30/4 = 7.5 FPS) agar kecepatan 
+        # gerakan yang dipelajari AI sama persis dengan kecepatan gerakan di dunia nyata.
+        if frame_count % 4 != 0:
+            continue
 
         # Konversi BGR (OpenCV) -> RGB (MediaPipe)
         rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)

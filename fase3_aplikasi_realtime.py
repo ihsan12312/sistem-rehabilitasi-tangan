@@ -26,6 +26,10 @@ import os
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['GLOG_minloglevel'] = '2'
+
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf.symbol_database")
 
 import csv
 import logging
@@ -37,6 +41,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from threading import Thread, Lock
 
 import cv2
 import joblib
@@ -51,6 +56,42 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 log = logging.getLogger("Rehabilitasi")
+
+
+# ============================================================
+# THREADED VIDEO STREAM UNTUK MENGHILANGKAN BOTTLENECK I/O
+# ============================================================
+class VideoStream:
+    def __init__(self, src=0, width=640, height=480):
+        self.stream = cv2.VideoCapture(src)
+        self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self.grabbed, self.frame = self.stream.read()
+        self.stopped = False
+        self.lock = Lock()
+
+    def start(self):
+        t = Thread(target=self.update, args=())
+        t.daemon = True
+        t.start()
+        return self
+
+    def update(self):
+        while True:
+            if self.stopped:
+                self.stream.release()
+                return
+            grabbed, frame = self.stream.read()
+            with self.lock:
+                self.grabbed = grabbed
+                self.frame = frame
+
+    def read(self):
+        with self.lock:
+            return self.grabbed, (self.frame.copy() if self.frame is not None else None)
+
+    def stop(self):
+        self.stopped = True
 
 
 # ============================================================
@@ -443,17 +484,14 @@ class RehabilitasiSystem:
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=1,
+            model_complexity=0, # OPTIMASI SUPER CEPAT (Gunakan model paling ringan)
             min_detection_confidence=self.cfg.min_detect_conf,
             min_tracking_confidence=self.cfg.min_track_conf,
         )
 
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            log.error("Webcam tidak dapat diakses!")
-            return
-
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        log.info("Memulai kamera dengan Multithreading...")
+        cap = VideoStream(src=0, width=640, height=480).start()
+        time.sleep(1.0) # Beri waktu kamera memanas
 
         self._running      = True
         self.session_start = time.time()
@@ -461,8 +499,8 @@ class RehabilitasiSystem:
         try:
             while self._running:
                 ret, frame = cap.read()
-                if not ret:
-                    log.warning("Gagal membaca frame, mencoba lagi...")
+                if not ret or frame is None:
+                    log.warning("Gagal membaca frame, menunggu kamera...")
                     time.sleep(0.05)
                     continue
 
@@ -491,11 +529,12 @@ class RehabilitasiSystem:
                     scaled = self.scaler.transform(flat).flatten()
                     self.seq_buffer.append(scaled)
 
-                    # Inferensi jika buffer penuh
+                    # Inferensi hanya setiap 3 frame untuk menghemat CPU (Frame Skipping Inference)
                     if len(self.seq_buffer) == self.cfg.window_size:
-                        self.current_mse = self._predict_mse()
-                        self.mse_graph_data.append(self.current_mse)
-                        self._update_anomaly_status(self.current_mse)
+                        if self.total_frames % 3 == 0:
+                            self.current_mse = self._predict_mse()
+                            self.mse_graph_data.append(self.current_mse)
+                            self._update_anomaly_status(self.current_mse)
                         self._log_frame(self.current_mse, self.current_status)
                     else:
                         self.current_status = f"Mengisi buffer... {len(self.seq_buffer)}/{self.cfg.window_size}"
@@ -524,7 +563,7 @@ class RehabilitasiSystem:
 
         finally:
             self._running = False
-            cap.release()
+            cap.stop()
             if self.hands:
                 self.hands.close()
             cv2.destroyAllWindows()
