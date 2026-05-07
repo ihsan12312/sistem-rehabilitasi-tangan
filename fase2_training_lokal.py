@@ -55,7 +55,7 @@ class TrainingConfig:
     random_seed: int   = 42
     lr:          float = 0.001
     # Threshold: μ + k*σ (k=4 lebih toleran untuk menekan False Positive hingga nyaris 0%)
-    threshold_k: float = 4.0
+    threshold_k: float = 4
 
 
 def build_model(cfg: TrainingConfig):
