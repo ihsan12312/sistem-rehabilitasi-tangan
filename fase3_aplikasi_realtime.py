@@ -2,10 +2,12 @@
 ==========================================================================
 FASE 3: APLIKASI REAL-TIME "Rehabilitasi" - ADVANCED DEPLOYMENT
 Proyek Skripsi: Deteksi Anomali Gerakan Rehabilitasi Tangan
-Versi: 3.0 Advanced | Menggunakan LSTM-Autoencoder + MediaPipe
+Versi: 3.1 Optimized | LSTM-Autoencoder + MediaPipe + Async Inference
 ==========================================================================
 FITUR ADVANCED:
 - Arsitektur OOP penuh (class RehabilitasiSystem)
+- [BARU v3.1] Async inference thread — UI tidak pernah freeze lagi
+- [BARU v3.1] TFLite support otomatis (3-5x lebih cepat di CPU)
 - Smoothing prediksi (anti false-alarm)
 - Minimum anomaly streak detection
 - Real-time MSE graph di layar
@@ -19,7 +21,12 @@ FITUR ADVANCED:
 KONTROL:
 Q = Keluar   |   S = Simpan Snapshot   |   R = Reset Sesi
 ==========================================================================
-"""
+OPTIMASI FPS (v3.1):
+- Inferensi LSTM dijalankan di background thread terpisah
+- Main loop hanya mengurus MediaPipe + UI rendering
+- Model TFLite digunakan otomatis jika ada (jalankan convert_to_tflite.py)
+- Fallback ke model Keras jika TFLite tidak tersedia
+=========================================================================="""
 
 # --- Environment fix HARUS paling pertama ---
 import os
@@ -104,13 +111,14 @@ class VideoStream:
 @dataclass
 class SystemConfig:
     model_path:       str   = "models/otak_Rehabilitasi.keras"
+    tflite_path:      str   = "models/otak_Rehabilitasi.tflite"  # [v3.1] TFLite (lebih cepat)
     scaler_path:      str   = "models/scaler_Rehabilitasi.pkl"
     threshold_path:   str   = "models/threshold_value.txt"
     session_log_dir:  str   = "data/session_logs"
     snapshot_dir:     str   = "data/snapshots"
 
     window_size:      int   = 30          # HARUS sama dengan saat training
-    n_features:       int   = 63          # 21 landmark × 3 sumbu
+    n_features:       int   = 63          # 21 landmark x 3 sumbu
     min_detect_conf:  float = 0.7
     min_track_conf:   float = 0.5
 
@@ -122,6 +130,11 @@ class SystemConfig:
 
     # Tampilan MSE graph
     mse_graph_history: int = 90          # Jumlah titik di graph
+
+    # [v3.1] Ukuran tampilan jendela (bisa diperbesar tanpa mempengaruhi performa)
+    # Kamera tetap capture di 640x480, tapi ditampilkan di ukuran ini.
+    display_width:  int = 1280
+    display_height: int = 720
 
 
 # ============================================================
@@ -138,9 +151,15 @@ class RehabilitasiSystem:
         self._running = False
 
         # AI Components
-        self.model    = None
+        self.model    = None       # Model Keras (fallback)
         self.scaler   = None
         self.threshold: float = 0.015
+
+        # [v3.1] TFLite interpreter (lebih cepat, diutamakan)
+        self._tflite_interpreter = None
+        self._tflite_input_idx   = None
+        self._tflite_output_idx  = None
+        self._use_tflite: bool   = False
 
         # MediaPipe
         self.mp_hands    = mp.solutions.hands
@@ -171,8 +190,6 @@ class RehabilitasiSystem:
         self.normal_frames     = 0
         self.anomaly_events    = 0
         self._prev_anomaly     = False
-        # [PERBAIKAN] Counter khusus untuk frame skipping inferensi
-        # Terpisah dari total_frames agar tidak terpengaruh frame tanpa tangan
         self._inference_counter: int = 0
 
         # FPS
@@ -180,6 +197,12 @@ class RehabilitasiSystem:
 
         # Session log
         self._session_log: list = []
+
+        # [v3.1] Async Inference Threading
+        # Inferensi LSTM berjalan di thread terpisah agar UI tidak pernah freeze.
+        self._inference_thread: Optional[Thread] = None
+        self._is_inferencing: bool               = False
+        self._result_lock = Lock()  # Melindungi variabel hasil dari race condition
 
         # Graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -203,12 +226,35 @@ class RehabilitasiSystem:
         return True
 
     def _load_model(self) -> bool:
+        """[v3.1] Coba load TFLite dulu (lebih cepat), fallback ke Keras."""
         import tensorflow as tf
-        load_model = tf.keras.models.load_model
-        log.info(f"Memuat Model AI dari: {self.cfg.model_path}")
+
+        # --- Coba TFLite terlebih dahulu ---
+        tflite_path = Path(self.cfg.tflite_path)
+        if tflite_path.exists():
+            log.info(f"[TFLite] Ditemukan model TFLite: {tflite_path}")
+            try:
+                interpreter = tf.lite.Interpreter(model_path=str(tflite_path))
+                interpreter.allocate_tensors()
+                self._tflite_interpreter = interpreter
+                self._tflite_input_idx   = interpreter.get_input_details()[0]['index']
+                self._tflite_output_idx  = interpreter.get_output_details()[0]['index']
+                self._use_tflite = True
+                log.info("[TFLite] Model TFLite berhasil dimuat! (Mode: CEPAT)")
+                return True
+            except Exception as e:
+                log.warning(f"[TFLite] Gagal load TFLite ({e}), fallback ke Keras...")
+                self._use_tflite = False
+        else:
+            log.info(f"[TFLite] File .tflite tidak ditemukan di '{tflite_path}'.")
+            log.info("         Jalankan 'python convert_to_tflite.py' untuk performa lebih baik.")
+
+        # --- Fallback: Load model Keras biasa ---
+        log.info(f"Memuat Model Keras dari: {self.cfg.model_path}")
         try:
-            self.model = load_model(self.cfg.model_path, compile=False)
-            log.info("Model berhasil dimuat!")
+            self.model = tf.keras.models.load_model(self.cfg.model_path, compile=False)
+            self._use_tflite = False
+            log.info("Model Keras berhasil dimuat! (Mode: STANDAR)")
             return True
         except Exception as e:
             log.error(f"Gagal memuat model: {e}")
@@ -275,14 +321,49 @@ class RehabilitasiSystem:
         coords -= coords[0]                      # Normalisasi ego-centric
         return coords.flatten().reshape(1, -1)   # (1, 63)
 
+    def _run_inference(self, input_data: np.ndarray) -> float:
+        """[v3.1] Jalankan inferensi menggunakan TFLite atau Keras, kembalikan MSE raw."""
+        if self._use_tflite and self._tflite_interpreter is not None:
+            # --- Mode TFLite (3-5x lebih cepat di CPU) ---
+            self._tflite_interpreter.set_tensor(
+                self._tflite_input_idx,
+                input_data.astype(np.float32)
+            )
+            self._tflite_interpreter.invoke()
+            recon = self._tflite_interpreter.get_tensor(self._tflite_output_idx)
+        else:
+            # --- Mode Keras (fallback) ---
+            recon = self.model(input_data, training=False).numpy()
+
+        raw_mse = float(np.mean(np.power(input_data - recon, 2)))
+        return raw_mse
+
+    def _background_inference(self, input_data: np.ndarray):
+        """
+        [v3.1] Inferensi berjalan di background thread — main loop tidak freeze.
+        Setelah selesai, hasil ditulis ke variabel shared dengan lock tipis.
+        """
+        try:
+            raw_mse = self._run_inference(input_data)
+
+            # Smoothing dan update status di dalam lock agar thread-safe
+            with self._result_lock:
+                self.mse_history_smooth.append(raw_mse)
+                smoothed = float(np.mean(self.mse_history_smooth))
+                self.current_mse = smoothed
+                self.mse_graph_data.append(smoothed)
+                self._update_anomaly_status(smoothed)
+        except Exception as e:
+            log.warning(f"[InferenceThread] Error: {e}")
+        finally:
+            self._is_inferencing = False
+
     def _predict_mse(self) -> float:
-        """Jalankan inferensi dan hitung MSE (dismoothing)."""
+        """Legacy method — masih dipakai oleh _validate_model_shape. Jangan hapus."""
         input_data = np.array(self.seq_buffer).reshape(
             1, self.cfg.window_size, self.cfg.n_features
         )
-        recon = self.model(input_data, training=False).numpy()
-        raw_mse = float(np.mean(np.power(input_data - recon, 2)))
-
+        raw_mse = self._run_inference(input_data)
         self.mse_history_smooth.append(raw_mse)
         smoothed = float(np.mean(self.mse_history_smooth))
         return smoothed
@@ -297,7 +378,7 @@ class RehabilitasiSystem:
         prev = self.is_anomaly
         self.is_anomaly = (self.anomaly_streak >= self.cfg.anomaly_streak_needed)
 
-        # Hitung event anomali baru
+        # Hitung event anomali baru (hanya saat transisi dari normal ke anomali)
         if self.is_anomaly and not prev:
             self.anomaly_events += 1
 
@@ -308,7 +389,9 @@ class RehabilitasiSystem:
         else:
             self.current_status = "NORMAL"
             self.current_color  = (0, 255, 0)
-            self.normal_frames += 1
+            # [PERBAIKAN BUG] normal_frames TIDAK lagi dihitung di sini.
+            # Dipindah ke main loop agar dihitung setiap frame terdeteksi,
+            # bukan hanya setiap 3 frame (sesuai frekuensi inferensi).
             self._prev_anomaly  = False
 
     # --------------------------------------------------------
@@ -432,9 +515,12 @@ class RehabilitasiSystem:
 
     def _draw_header(self, frame: np.ndarray):
         h, w = frame.shape[:2]
+        # [v3.1] Tampilkan mode inferensi di header
+        mode_tag = "TFLite" if self._use_tflite else "Keras"
+        busy_tag = " [~]" if self._is_inferencing else ""
         cv2.rectangle(frame, (0, 0), (w, 42), (20, 20, 20), -1)
         cv2.putText(frame,
-                    "Rehabilitasi  |  Sistem Deteksi Anomali Gerakan Tangan  |  v3.0 Advanced",
+                    f"Rehabilitasi  |  Deteksi Anomali v3.1 Optimized  |  Model: {mode_tag}{busy_tag}",
                     (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 1, cv2.LINE_AA)
 
     def _draw_status_bar(self, frame: np.ndarray):
@@ -485,13 +571,16 @@ class RehabilitasiSystem:
     # --------------------------------------------------------
     def run(self):
         """Entry point utama. Jalankan loop webcam."""
+        mode_str = "TFLite (CEPAT)" if self._use_tflite else "Keras (Standar)"
         log.info("=" * 60)
-        log.info("  Rehabilitasi - SISTEM DETEKSI ANOMALI REAL-TIME v3.0")
+        log.info("  Rehabilitasi - SISTEM DETEKSI ANOMALI REAL-TIME v3.1")
         log.info("=" * 60)
         log.info(f"  Threshold : {self.threshold:.8f}")
         log.info(f"  Window    : {self.cfg.window_size} frame")
         log.info(f"  Streak    : {self.cfg.anomaly_streak_needed} frame berturut")
         log.info(f"  Smooth    : {self.cfg.mse_smooth_window} sample")
+        log.info(f"  Model     : {mode_str}")
+        log.info(f"  Inference : Async Background Thread (UI tidak freeze)")
         log.info("=" * 60)
         log.info("Kontrol: [Q] Keluar  [S] Snapshot  [R] Reset Sesi")
         log.info("-" * 60)
@@ -513,6 +602,13 @@ class RehabilitasiSystem:
 
         log.info("Kamera menyala. Menunggu stabilisasi (1 detik)...")
         time.sleep(1.0)  # Beri waktu kamera memanas
+
+        # Buat jendela yang bisa di-resize oleh user
+        WIN_NAME = "Rehabilitasi - Deteksi Anomali v3.0"
+        cv2.namedWindow(WIN_NAME, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(WIN_NAME, self.cfg.display_width, self.cfg.display_height)
+        log.info(f"Ukuran jendela: {self.cfg.display_width}x{self.cfg.display_height} "
+                 f"(bisa diubah manual dengan drag sudut jendela)")
 
         self._running      = True
         self.session_start = time.time()
@@ -551,14 +647,31 @@ class RehabilitasiSystem:
                     self.seq_buffer.append(scaled)
                     self._inference_counter += 1
 
-                    # [PERBAIKAN] Inferensi setiap 3 frame TANGAN TERDETEKSI
-                    # Menggunakan _inference_counter (bukan total_frames) agar
-                    # inferensi tidak terlewat saat tangan sempat menghilang.
                     if len(self.seq_buffer) == self.cfg.window_size:
-                        if self._inference_counter % 3 == 0:
-                            self.current_mse = self._predict_mse()
-                            self.mse_graph_data.append(self.current_mse)
-                            self._update_anomaly_status(self.current_mse)
+                        # [v3.1] ASYNC INFERENCE: Lempar ke background thread jika idle
+                        # Main loop tidak pernah menunggu model selesai menghitung.
+                        # Hasilnya (current_mse, is_anomaly) diupdate oleh thread
+                        # begitu selesai, dengan interval alami sesuai kecepatan model.
+                        if not self._is_inferencing:
+                            # Ambil snapshot buffer agar aman dari perubahan di thread utama
+                            input_snapshot = np.array(self.seq_buffer).reshape(
+                                1, self.cfg.window_size, self.cfg.n_features
+                            ).astype(np.float32)
+                            self._is_inferencing = True
+                            self._inference_thread = Thread(
+                                target=self._background_inference,
+                                args=(input_snapshot,),
+                                daemon=True
+                            )
+                            self._inference_thread.start()
+
+                        # Hitung normal_frames setiap frame tangan terdeteksi
+                        # berdasarkan status is_anomaly terkini (dari thread terakhir).
+                        with self._result_lock:
+                            is_anomaly_now = self.is_anomaly
+                        if not is_anomaly_now:
+                            self.normal_frames += 1
+
                         self._log_frame(self.current_mse, self.current_status)
                     else:
                         self.current_status = f"Mengisi buffer... {len(self.seq_buffer)}/{self.cfg.window_size}"
@@ -574,7 +687,15 @@ class RehabilitasiSystem:
                 self._draw_stats_panel(frame, fps)
                 self._draw_status_bar(frame)
 
-                cv2.imshow("Rehabilitasi - Deteksi Anomali v3.0", frame)
+                # Scale-up tampilan ke ukuran yang lebih besar
+                # Proses tetap di resolusi asli (640x480) untuk performa,
+                # tapi ditampilkan lebih besar agar tangan mudah dilihat.
+                display_frame = cv2.resize(
+                    frame,
+                    (self.cfg.display_width, self.cfg.display_height),
+                    interpolation=cv2.INTER_LINEAR
+                )
+                cv2.imshow(WIN_NAME, display_frame)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q') or key == 27:

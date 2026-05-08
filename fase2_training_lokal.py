@@ -155,7 +155,7 @@ def save_threshold_histogram(mse_train: np.ndarray, threshold: float, model_dir:
         fig, ax = plt.subplots(figsize=(10, 5))
         ax.hist(mse_train, bins=50, color='#2196F3', alpha=0.7, edgecolor='white', label='MSE Training')
         ax.axvline(threshold, color='#FF5722', linewidth=2, linestyle='--',
-                   label=f'Threshold = {threshold:.6f}')
+                label=f'Threshold = {threshold:.6f}')
         ax.set_title('Distribusi MSE Training & Threshold Anomali', fontsize=13)
         ax.set_xlabel('MSE')
         ax.set_ylabel('Frekuensi')
