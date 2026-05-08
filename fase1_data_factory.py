@@ -8,6 +8,12 @@ TUJUAN   : Mengekstrak landmark tangan dari video rekaman gerakan normal,
             menormalisasi koordinat, lalu menyimpannya ke file CSV.
 EKSEKUSI : Jalankan di VS Code / komputer lokal.
 OUTPUT   : data/processed_data/dataset_normal.csv
+--------------------------------------------------------------------------
+PENINGKATAN v2 (Advanced Data Quality):
+- [BARU] EMA Smoothing Filter: meredam micro-jitter MediaPipe antar frame
+- [BARU] Scale Invariance: membagi koordinat dengan jarak Wrist→MCP Jari
+          Tengah (Titik 9), agar model kebal terhadap variasi jarak kamera
+- [BARU] model_complexity=1: akurasi landmark lebih baik saat ekstraksi
 ==========================================================================
 """
 
@@ -41,8 +47,13 @@ def extract_and_normalize(video_path: str, window_size: int = 30) -> np.ndarray:
     """
     Membaca satu file video, mengekstrak landmark tangan per-frame
     dengan MediaPipe, menormalisasi secara ego-centric (pergelangan
-    tangan sebagai titik pusat 0,0,0), lalu menghasilkan sekuens
-    menggunakan sliding window.
+    tangan sebagai titik pusat 0,0,0) + Scale Invariance, lalu
+    menghasilkan sekuens menggunakan sliding window.
+
+    Normalisasi v2 (Advanced):
+      1. EMA Smoothing     : meredam micro-jitter MediaPipe antar frame
+      2. Translational Inv.: kurangi semua titik dengan Wrist (titik 0)
+      3. Scale Invariance  : bagi dengan jarak Wrist → MCP Jari Tengah (titik 9)
 
     Sinkronisasi Temporal: Hanya mengambil setiap frame ke-FRAME_SKIP
     agar kecepatan gerakan yang dipelajari AI cocok dengan kecepatan
@@ -62,7 +73,7 @@ def extract_and_normalize(video_path: str, window_size: int = 30) -> np.ndarray:
     hands = mp_hands.Hands(
         static_image_mode=False,
         max_num_hands=1,
-        model_complexity=0,           # Model ringan, cukup untuk ekstraksi
+        model_complexity=1,           # Ditingkatkan ke 1 untuk akurasi landmark lebih baik
         min_detection_confidence=MIN_DETECT_CONF
     )
 
@@ -84,6 +95,12 @@ def extract_and_normalize(video_path: str, window_size: int = 30) -> np.ndarray:
     frame_data  = []
     frame_count = 0
 
+    # ---- [BARU] Variabel untuk EMA Smoothing ----
+    # alpha = 1.0 → tanpa smoothing, 0.1 → sangat lambat/halus
+    # alpha = 0.7 memberikan keseimbangan antara responsif dan mulus
+    prev_coords = None
+    alpha = 0.7
+
     while True:
         ret, image = cap.read()
         if not ret:
@@ -101,16 +118,34 @@ def extract_and_normalize(video_path: str, window_size: int = 30) -> np.ndarray:
         if results.multi_hand_landmarks:
             hand_landmarks = results.multi_hand_landmarks[0]
 
-            # Ekstraksi 21 koordinat (x, y, z) → shape: (21, 3)
+            # 1. Ekstraksi 21 koordinat (x, y, z) → shape: (21, 3)
             coords = np.array(
                 [[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark],
                 dtype=np.float32
             )
 
-            # ---- NORMALISASI EGO-CENTRIC ----
-            # Kurangi semua titik dengan koordinat pergelangan tangan (index 0)
-            # Tujuan: gerakan yang sama di posisi layar berbeda tetap identik
-            normalized_coords = coords - coords[0]  # shape: (21, 3)
+            # 2. [BARU] EMA Smoothing — hilangkan micro-jitter kamera
+            if prev_coords is None:
+                smoothed_coords = coords
+            else:
+                smoothed_coords = alpha * coords + (1 - alpha) * prev_coords
+            prev_coords = smoothed_coords
+
+            # 3. NORMALISASI EGO-CENTRIC (Translational Invariance)
+            # Geser titik nol ke pergelangan tangan agar posisi layar tidak berpengaruh
+            wrist = smoothed_coords[0]
+            translated_coords = smoothed_coords - wrist  # shape: (21, 3)
+
+            # 4. [BARU] NORMALISASI SKALA (Scale Invariance)
+            # Bagi dengan jarak Wrist (0,0,0) → MCP Jari Tengah (titik 9)
+            # Rumus: d = sqrt(x² + y² + z²) = np.linalg.norm(titik_9)
+            middle_finger_mcp = translated_coords[9]
+            scale = np.linalg.norm(middle_finger_mcp)  # Jarak dari 0,0,0
+
+            if scale > 1e-6:   # Hindari pembagian dengan nol
+                normalized_coords = translated_coords / scale
+            else:
+                normalized_coords = translated_coords
 
             # Ratakan menjadi 1D: 21 * 3 = 63 fitur
             frame_data.append(normalized_coords.flatten())  # shape: (63,)

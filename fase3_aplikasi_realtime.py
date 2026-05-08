@@ -2,12 +2,13 @@
 ==========================================================================
 FASE 3: APLIKASI REAL-TIME "Rehabilitasi" - ADVANCED DEPLOYMENT
 Proyek Skripsi: Deteksi Anomali Gerakan Rehabilitasi Tangan
-Versi: 3.1 Optimized | LSTM-Autoencoder + MediaPipe + Async Inference
+Versi: 3.2 Optimized | BiLSTM-Autoencoder + MediaPipe + Async Inference
 ==========================================================================
 FITUR ADVANCED:
 - Arsitektur OOP penuh (class RehabilitasiSystem)
-- [BARU v3.1] Async inference thread — UI tidak pernah freeze lagi
-- [BARU v3.1] TFLite support otomatis (3-5x lebih cepat di CPU)
+- [v3.1] Async inference thread — UI tidak pernah freeze lagi
+- [v3.1] TFLite support otomatis (3-5x lebih cepat di CPU)
+- [v3.2] EMA Smoothing + Scale Invariance — selaras dengan Fase 1 v2
 - Smoothing prediksi (anti false-alarm)
 - Minimum anomaly streak detection
 - Real-time MSE graph di layar
@@ -198,6 +199,11 @@ class RehabilitasiSystem:
         # Session log
         self._session_log: list = []
 
+        # [v3.2] Smoothing state untuk EMA — selaras dengan Fase 1 v2
+        # alpha=0.7 sama dengan fase1_data_factory.py
+        self._ema_prev_coords: Optional[np.ndarray] = None
+        self._ema_alpha: float = 0.7
+
         # [v3.1] Async Inference Threading
         # Inferensi LSTM berjalan di thread terpisah agar UI tidak pernah freeze.
         self._inference_thread: Optional[Thread] = None
@@ -313,13 +319,39 @@ class RehabilitasiSystem:
     # CORE INFERENCE
     # --------------------------------------------------------
     def _extract_landmarks(self, hand_landmarks) -> np.ndarray:
-        """Ekstrak dan normalisasi landmark tangan (ego-centric)."""
+        """
+        Ekstrak dan normalisasi landmark tangan — HARUS identik dengan Fase 1 v2.
+
+        Pipeline (urutan wajib sama persis dengan fase1_data_factory.py):
+          1. Ekstraksi 21 koordinat raw dari MediaPipe
+          2. EMA Smoothing (alpha=0.7) — hilangkan micro-jitter kamera
+          3. Translational Invariance: geser titik nol ke Wrist (titik 0)
+          4. Scale Invariance: bagi dengan jarak Wrist → MCP Jari Tengah (titik 9)
+        """
         coords = np.array(
             [[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark],
             dtype=np.float32
         )  # (21, 3)
-        coords -= coords[0]                      # Normalisasi ego-centric
-        return coords.flatten().reshape(1, -1)   # (1, 63)
+
+        # 2. EMA Smoothing — hilangkan micro-jitter kamera
+        if self._ema_prev_coords is None:
+            smoothed = coords
+        else:
+            smoothed = self._ema_alpha * coords + (1 - self._ema_alpha) * self._ema_prev_coords
+        self._ema_prev_coords = smoothed
+
+        # 3. Translational Invariance: geser ke pergelangan tangan
+        wrist = smoothed[0]
+        translated = smoothed - wrist  # (21, 3)
+
+        # 4. Scale Invariance: bagi dengan jarak Wrist → MCP Jari Tengah (titik 9)
+        scale = np.linalg.norm(translated[9])  # Jarak dari 0,0,0
+        if scale > 1e-6:
+            normalized = translated / scale
+        else:
+            normalized = translated
+
+        return normalized.flatten().reshape(1, -1)   # (1, 63)
 
     def _run_inference(self, input_data: np.ndarray) -> float:
         """[v3.1] Jalankan inferensi menggunakan TFLite atau Keras, kembalikan MSE raw."""
@@ -430,6 +462,7 @@ class RehabilitasiSystem:
         self.anomaly_streak  = 0
         self.is_anomaly      = False
         self._session_log    = []
+        self._ema_prev_coords = None  # [v3.2] Reset state EMA smoothing
         log.info("Sesi di-reset.")
 
     def _save_snapshot(self, frame: np.ndarray):

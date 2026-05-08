@@ -2,16 +2,21 @@
 ==========================================================================
 FASE 2: PELATIHAN MODEL LSTM-AUTOENCODER — ADVANCED
 Proyek Skripsi: Deteksi Anomali Gerakan Rehabilitasi Tangan
-Versi: 2.0 Advanced
+Versi: 3.0 Advanced — BiLSTM + StandardScaler
 ==========================================================================
-PENINGKATAN:
-- Logging terstruktur dengan timestamp
-- Plot training history otomatis disimpan ke PNG
-- Validasi threshold via distribusi statistik (histogram disimpan)
-- Laporan evaluasi model lengkap (MSE stats per split)
-- Arsitektur model dengan BatchNormalization
-- Konfigurasi via dataclass
+PENINGKATAN v3 (selaras dengan Fase 1 v2):
+- StandardScaler (Z-Score) menggantikan MinMaxScaler:
+    * Data ego-centric + scale-invariant bisa bernilai negatif
+    * StandardScaler mempertahankan distribusi asli (mean=0, std=1)
+    * Fungsi aktivasi tanh di LSTM bekerja lebih efisien
+- Bidirectional LSTM:
+    * Membaca sekuens dari dua arah (maju + mundur)
+    * Konteks gerakan lebih kaya → rekonstruksi lebih akurat
+- Aktivasi 'linear' di layer output:
+    * Selaras dengan StandardScaler (output tidak terbatas -1..1)
+    * Rekonstruksi tidak terpotong oleh aktivasi tanh
 ==========================================================================
+"""
 """
 
 import logging
@@ -31,7 +36,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import StandardScaler  # [v3.0] Ganti MinMaxScaler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -61,9 +66,10 @@ class TrainingConfig:
 
 
 def build_model(cfg: TrainingConfig):
-    """Bangun arsitektur LSTM-Autoencoder dengan BatchNormalization."""
+    """Bangun arsitektur Bidirectional LSTM-Autoencoder."""
     import tensorflow as tf
     LSTM = tf.keras.layers.LSTM
+    Bidirectional = tf.keras.layers.Bidirectional   # [v3.0] Baru
     BatchNormalization = tf.keras.layers.BatchNormalization
     Dense = tf.keras.layers.Dense
     Dropout = tf.keras.layers.Dropout
@@ -72,34 +78,42 @@ def build_model(cfg: TrainingConfig):
     TimeDistributed = tf.keras.layers.TimeDistributed
     Sequential = tf.keras.models.Sequential
 
-    model = Sequential(name="LSTM_Autoencoder_Rehabilitasi_v2")
-
-    # ---- INPUT (cara baru Keras — menghilangkan UserWarning) ----
+    model = Sequential(name="BiLSTM_Autoencoder_Rehabilitasi_v3")
     model.add(Input(shape=(cfg.window_size, cfg.n_features)))
 
-    # ---- ENCODER ----
-    model.add(LSTM(128, activation='tanh', return_sequences=True))
+    # ---- ENCODER (Bidirectional) ----
+    # [v3.0] Bidirectional: baca sekuens dari dua arah, konteks lebih kaya
+    model.add(Bidirectional(LSTM(64, activation='tanh', return_sequences=True)))
     model.add(BatchNormalization())
     model.add(Dropout(0.2))
-    model.add(LSTM(64, activation='tanh', return_sequences=True))
+
+    model.add(Bidirectional(LSTM(32, activation='tanh', return_sequences=True)))
     model.add(BatchNormalization())
     model.add(Dropout(0.2))
-    model.add(LSTM(32, activation='tanh', return_sequences=False))
+
+    # Layer Bottleneck (mengompresi informasi ke representasi paling esensial)
+    # return_sequences=False → menghasilkan satu vektor per sekuens
+    model.add(Bidirectional(LSTM(16, activation='tanh', return_sequences=False)))
     model.add(BatchNormalization())
 
     # ---- BOTTLENECK ----
+    # Bidirectional(16) menghasilkan 32 unit (16 maju + 16 mundur)
     model.add(RepeatVector(cfg.window_size))
 
-    # ---- DECODER ----
-    model.add(LSTM(32, activation='tanh', return_sequences=True))
+    # ---- DECODER (Bidirectional) ----
+    model.add(Bidirectional(LSTM(16, activation='tanh', return_sequences=True)))
     model.add(BatchNormalization())
     model.add(Dropout(0.2))
-    model.add(LSTM(64, activation='tanh', return_sequences=True))
+
+    model.add(Bidirectional(LSTM(32, activation='tanh', return_sequences=True)))
     model.add(BatchNormalization())
     model.add(Dropout(0.2))
-    model.add(LSTM(128, activation='tanh', return_sequences=True))
+
+    model.add(Bidirectional(LSTM(64, activation='tanh', return_sequences=True)))
     model.add(BatchNormalization())
-    model.add(TimeDistributed(Dense(cfg.n_features)))
+
+    # [v3.0] Aktivasi 'linear': karena StandardScaler output tidak dibatasi rentang -1..1
+    model.add(TimeDistributed(Dense(cfg.n_features, activation='linear')))
 
     Adam = tf.keras.optimizers.Adam
     model.compile(
@@ -207,9 +221,11 @@ def main():
     log.info(f"   Shape dataset: {data_3d.shape}  ({data_3d.shape[0]} sekuens)")
 
     # ---- 2. Normalisasi ----
-    log.info("2. Normalisasi MinMaxScaler...")
+    log.info("2. Normalisasi StandardScaler (Z-Score)...")
+    log.info("   [v3.0] StandardScaler: mean=0, std=1. Optimal untuk data ego-centric")
+    log.info("          yang memiliki nilai negatif setelah translasi ke titik wrist.")
     data_2d        = data_3d.reshape(-1, cfg.n_features)
-    scaler         = MinMaxScaler(feature_range=(0, 1))
+    scaler         = StandardScaler()  # [v3.0] Ganti MinMaxScaler
     data_2d_scaled = scaler.fit_transform(data_2d)
     data_scaled    = data_2d_scaled.reshape(-1, cfg.window_size, cfg.n_features)
 
@@ -232,7 +248,7 @@ def main():
     ModelCheckpoint = tf.keras.callbacks.ModelCheckpoint
     ReduceLROnPlateau = tf.keras.callbacks.ReduceLROnPlateau
 
-    log.info("4. Membangun arsitektur LSTM-Autoencoder Advanced...")
+    log.info("4. Membangun arsitektur Bidirectional LSTM-Autoencoder v3 ...")  # [v3.0]
     model = build_model(cfg)
     model.summary(print_fn=lambda x: log.info(f"   {x}"))
 
