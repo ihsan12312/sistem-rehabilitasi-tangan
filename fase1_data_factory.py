@@ -12,7 +12,7 @@ OUTPUT   : data/processed_data/dataset_normal.csv
 PENINGKATAN v2 (Advanced Data Quality):
 - [BARU] EMA Smoothing Filter: meredam micro-jitter MediaPipe antar frame
 - [BARU] Scale Invariance: membagi koordinat dengan jarak Wrist→MCP Jari
-          Tengah (Titik 9), agar model kebal terhadap variasi jarak kamera
+        Tengah (Titik 9), agar model kebal terhadap variasi jarak kamera
 - [BARU] model_complexity=1: akurasi landmark lebih baik saat ekstraksi
 ==========================================================================
 """
@@ -90,7 +90,7 @@ def extract_and_normalize(video_path: str, window_size: int = 30) -> np.ndarray:
     effective_fps = original_fps / FRAME_SKIP if original_fps > 0 else "?"
     print(f"  Memproses: {os.path.basename(video_path)}")
     print(f"    FPS asli: {original_fps:.1f} | Total frame: {total_frames} | "
-          f"FPS efektif (setelah skip): {effective_fps:.1f}")
+        f"FPS efektif (setelah skip): {effective_fps:.1f}")
 
     frame_data  = []
     frame_count = 0
@@ -102,14 +102,23 @@ def extract_and_normalize(video_path: str, window_size: int = 30) -> np.ndarray:
     alpha = 0.7
 
     while True:
-        ret, image = cap.read()
-        if not ret:
+        # [EFISIENSI] grab() hanya mengambil frame tanpa men-decode (murah).
+        grabbed = cap.grab()
+        if not grabbed:
             break
 
         frame_count += 1
-        # Hanya proses setiap frame ke-FRAME_SKIP (Sinkronisasi Temporal)
+        # Hanya proses setiap frame ke-FRAME_SKIP (Sinkronisasi Temporal).
+        # Frame yang di-skip cukup di-grab tanpa decode → tidak membuang waktu
+        # men-decode 3 dari 4 frame. Frame yang dipakai persis sama (4,8,12,...)
+        # sehingga output CSV identik dengan versi sebelumnya.
         if frame_count % FRAME_SKIP != 0:
             continue
+
+        # [EFISIENSI] retrieve() men-decode HANYA frame yang benar-benar dipakai.
+        ret, image = cap.retrieve()
+        if not ret:
+            break
 
         # Konversi BGR (OpenCV) -> RGB (MediaPipe)
         rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -156,7 +165,7 @@ def extract_and_normalize(video_path: str, window_size: int = 30) -> np.ndarray:
     # Validasi: pastikan cukup frame untuk membentuk minimal 1 sekuens
     if len(frame_data) < window_size:
         print(f"  [PERINGATAN] Hanya {len(frame_data)} frame tangan terdeteksi "
-              f"(butuh minimal {window_size}). Video dilewati.")
+            f"(butuh minimal {window_size}). Video dilewati.")
         return np.array([])
 
     # ---- SLIDING WINDOW ----

@@ -114,16 +114,29 @@ def pose_to_hand_proxy(pose_coords):
 
 def normalize_ego_centric(hand_coords):
     """
-    Normalisasi ego-centric: jadikan titik 0 (pergelangan tangan) sebagai pusat.
-    IDENTIK dengan normalisasi di fase1_data_factory.py.
-    
+    Normalisasi ego-centric agar SELARAS dengan fase1_data_factory.py v2 dan
+    fase3_aplikasi_realtime.py:
+      1. Translational Invariance: geser titik nol ke pergelangan (titik 0)
+      2. Scale Invariance: bagi dengan jarak Wrist -> MCP Jari Tengah (titik 9)
+
+    Catatan: EMA smoothing sengaja TIDAK diterapkan di sini karena baris dataset
+    publik bukan stream temporal kontinu per-frame seperti video (smoothing antar
+    baris yang labelnya bisa berbeda justru mencemari data).
+
     Parameter:
         hand_coords: np.array shape (21, 3)
-    
+
     Return:
         np.array shape (21, 3) yang sudah dinormalisasi
     """
-    return hand_coords - hand_coords[0]
+    # 1. Translational Invariance
+    translated = hand_coords - hand_coords[0]
+
+    # 2. Scale Invariance (sama persis dengan Fase 1 / Fase 3)
+    scale = np.linalg.norm(translated[9])
+    if scale > 1e-6:
+        return translated / scale
+    return translated
 
 
 def build_sequences(frame_list, window_size):
@@ -142,9 +155,11 @@ def build_sequences(frame_list, window_size):
         return np.array([])
     
     sequences = []
-    for i in range(len(data) - window_size):
+    # +1 agar konsisten dengan sliding window di fase1_data_factory.py
+    # (mengikutsertakan window terakhir yang valid).
+    for i in range(len(data) - window_size + 1):
         sequences.append(data[i: i + window_size])
-    
+
     return np.array(sequences)
 
 

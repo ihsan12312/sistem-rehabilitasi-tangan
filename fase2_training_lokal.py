@@ -17,7 +17,6 @@ PENINGKATAN v3 (selaras dengan Fase 1 v2):
     * Rekonstruksi tidak terpotong oleh aktivasi tanh
 ==========================================================================
 """
-"""
 
 import logging
 import os
@@ -217,6 +216,18 @@ def main():
 
     log.info("1. Memuat dataset...")
     df = pd.read_csv(cfg.csv_file)
+
+    # Validasi jumlah kolom agar reshape tidak gagal dengan error kriptik.
+    expected_cols = cfg.window_size * cfg.n_features  # = 1890
+    if df.shape[1] != expected_cols:
+        log.error(
+            f"Jumlah kolom CSV ({df.shape[1]}) != yang diharapkan "
+            f"({expected_cols} = window_size {cfg.window_size} x n_features {cfg.n_features})."
+        )
+        log.error("Pastikan dataset dibuat oleh fase1_data_factory.py / adapter dengan "
+                  "WINDOW_SIZE & N_FEATURES yang sama.")
+        sys.exit(1)
+
     data_3d = df.values.reshape(-1, cfg.window_size, cfg.n_features).astype(np.float32)
     log.info(f"   Shape dataset: {data_3d.shape}  ({data_3d.shape[0]} sekuens)")
 

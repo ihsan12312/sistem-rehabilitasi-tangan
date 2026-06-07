@@ -55,6 +55,7 @@ import cv2
 import joblib
 import mediapipe as mp
 import numpy as np
+from mediapipe.python.solutions.drawing_styles import DrawingSpec
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -97,6 +98,9 @@ class VideoStream:
             with self.lock:
                 self.grabbed = grabbed
                 self.frame = frame
+            # Hindari hot-spin (100% CPU) bila kamera sedang gagal membaca.
+            if not grabbed:
+                time.sleep(0.005)
 
     def read(self):
         with self.lock:
@@ -125,6 +129,12 @@ class SystemConfig:
 
     # Anti false-alarm: anomali dilaporkan setelah N frame berturut-turut
     anomaly_streak_needed: int = 5
+
+    # [v3.3] Sinkronisasi temporal: laju pengisian buffer landmark.
+    # HARUS sama dengan laju data latih = FPS kamera (30) / FRAME_SKIP (4) di
+    # fase1_data_factory.py = 7.5 Hz. Mencegah window berisi gerakan terlalu
+    # cepat dibanding saat training (tanpa perlu retrain model).
+    target_sample_fps: float = 7.5
 
     # Smoothing: rata-rata dari N prediksi MSE terakhir
     mse_smooth_window: int = 8
@@ -203,6 +213,13 @@ class RehabilitasiSystem:
         # alpha=0.7 sama dengan fase1_data_factory.py
         self._ema_prev_coords: Optional[np.ndarray] = None
         self._ema_alpha: float = 0.7
+
+        # [v3.3] Sinkronisasi temporal: waktu terakhir frame di-sample ke buffer.
+        # Buffer hanya diisi pada laju target_sample_fps agar cocok dengan data latih.
+        self._last_sample_time: float = 0.0
+
+        # Style koneksi skeleton saat anomali (di-cache agar tidak import per-frame)
+        self._anomaly_conn_style = DrawingSpec(color=(0, 0, 255), thickness=2)
 
         # [v3.1] Async Inference Threading
         # Inferensi LSTM berjalan di thread terpisah agar UI tidak pernah freeze.
@@ -304,16 +321,24 @@ class RehabilitasiSystem:
             return False
 
     def _validate_model_shape(self):
-        """Validasi input shape model agar sesuai konfigurasi."""
+        """Validasi input shape model agar sesuai konfigurasi (Keras & TFLite)."""
         try:
-            expected = (None, self.cfg.window_size, self.cfg.n_features)
-            actual   = tuple(self.model.input_shape)
+            if self._use_tflite and self._tflite_interpreter is not None:
+                # TFLite memakai batch tetap = 1, mis. (1, 30, 63)
+                shape    = self._tflite_interpreter.get_input_details()[0]['shape']
+                actual   = tuple(int(x) for x in shape)
+                expected = (1, self.cfg.window_size, self.cfg.n_features)
+            else:
+                actual   = tuple(self.model.input_shape)
+                expected = (None, self.cfg.window_size, self.cfg.n_features)
+
             if actual == expected:
                 log.info(f"Validasi shape model OK: {actual}")
             else:
-                log.warning(f"Shape model {actual} != konfigurasi {expected}. Periksa WINDOW_SIZE/N_FEATURES!")
-        except Exception:
-            pass
+                log.warning(f"Shape model {actual} != konfigurasi {expected}. "
+                            "Periksa WINDOW_SIZE/N_FEATURES!")
+        except (AttributeError, IndexError, KeyError) as e:
+            log.warning(f"Tidak dapat memvalidasi shape model: {e}")
 
     # --------------------------------------------------------
     # CORE INFERENCE
@@ -390,16 +415,6 @@ class RehabilitasiSystem:
         finally:
             self._is_inferencing = False
 
-    def _predict_mse(self) -> float:
-        """Legacy method — masih dipakai oleh _validate_model_shape. Jangan hapus."""
-        input_data = np.array(self.seq_buffer).reshape(
-            1, self.cfg.window_size, self.cfg.n_features
-        )
-        raw_mse = self._run_inference(input_data)
-        self.mse_history_smooth.append(raw_mse)
-        smoothed = float(np.mean(self.mse_history_smooth))
-        return smoothed
-
     def _update_anomaly_status(self, mse: float):
         """Update status anomali dengan streak detection."""
         if mse >= self.threshold:
@@ -463,6 +478,7 @@ class RehabilitasiSystem:
         self.is_anomaly      = False
         self._session_log    = []
         self._ema_prev_coords = None  # [v3.2] Reset state EMA smoothing
+        self._last_sample_time = 0.0  # [v3.3] Reset penanda sampling temporal
         log.info("Sesi di-reset.")
 
     def _save_snapshot(self, frame: np.ndarray):
@@ -586,12 +602,12 @@ class RehabilitasiSystem:
     def _draw_hand_skeleton(self, frame, hand_landmarks):
         """Warna skeleton berbeda saat anomali vs normal."""
         lm_style = self.mp_styles.get_default_hand_landmarks_style()
-        cn_style = self.mp_styles.get_default_hand_connections_style()
 
         if self.is_anomaly:
-            # Override warna koneksi menjadi merah saat anomali
-            from mediapipe.python.solutions.drawing_styles import DrawingSpec
-            cn_style = DrawingSpec(color=(0, 0, 255), thickness=2)
+            # Override warna koneksi menjadi merah saat anomali (style di-cache)
+            cn_style = self._anomaly_conn_style
+        else:
+            cn_style = self.mp_styles.get_default_hand_connections_style()
 
         self.mp_drawing.draw_landmarks(
             frame, hand_landmarks,
@@ -671,22 +687,31 @@ class RehabilitasiSystem:
                     self.detected_frames += 1
                     hand_lm = results.multi_hand_landmarks[0]
 
-                    # Gambar skeleton
+                    # Gambar skeleton SETIAP frame agar visual tetap mulus.
                     self._draw_hand_skeleton(frame, hand_lm)
 
-                    # Ekstrak & scale landmark
-                    flat   = self._extract_landmarks(hand_lm)
-                    scaled = self.scaler.transform(flat).flatten()
-                    self.seq_buffer.append(scaled)
-                    self._inference_counter += 1
+                    # [v3.3] SINKRONISASI TEMPORAL: isi buffer hanya pada laju
+                    # target_sample_fps (= laju data latih). Tanpa ini, buffer
+                    # terisi sangat cepat (FPS render tinggi) sehingga 1 window
+                    # mencakup gerakan yang jauh lebih cepat daripada saat training
+                    # → akurasi anomali turun. EMA & scaler ikut berjalan pada
+                    # laju ini agar identik dengan fase1_data_factory.py.
+                    sample_interval = 1.0 / self.cfg.target_sample_fps
+                    if now - self._last_sample_time >= sample_interval:
+                        self._last_sample_time = now
 
-                    if len(self.seq_buffer) == self.cfg.window_size:
-                        # [v3.1] ASYNC INFERENCE: Lempar ke background thread jika idle
+                        # Ekstrak & scale landmark
+                        flat   = self._extract_landmarks(hand_lm)
+                        scaled = self.scaler.transform(flat).flatten()
+                        self.seq_buffer.append(scaled)
+                        self._inference_counter += 1
+
+                        # [v3.1] ASYNC INFERENCE: Lempar ke background thread jika idle.
                         # Main loop tidak pernah menunggu model selesai menghitung.
                         # Hasilnya (current_mse, is_anomaly) diupdate oleh thread
                         # begitu selesai, dengan interval alami sesuai kecepatan model.
-                        if not self._is_inferencing:
-                            # Ambil snapshot buffer agar aman dari perubahan di thread utama
+                        if len(self.seq_buffer) == self.cfg.window_size and not self._is_inferencing:
+                            # Snapshot buffer agar aman dari perubahan di thread utama
                             input_snapshot = np.array(self.seq_buffer).reshape(
                                 1, self.cfg.window_size, self.cfg.n_features
                             ).astype(np.float32)
@@ -698,8 +723,9 @@ class RehabilitasiSystem:
                             )
                             self._inference_thread.start()
 
-                        # Hitung normal_frames setiap frame tangan terdeteksi
-                        # berdasarkan status is_anomaly terkini (dari thread terakhir).
+                    # Status & skor diperbarui SETIAP frame terdeteksi (semantik skor
+                    # tidak berubah), berdasarkan is_anomaly terkini dari thread terakhir.
+                    if len(self.seq_buffer) == self.cfg.window_size:
                         with self._result_lock:
                             is_anomaly_now = self.is_anomaly
                         if not is_anomaly_now:
